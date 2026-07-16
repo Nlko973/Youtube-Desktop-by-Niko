@@ -6,7 +6,10 @@
         Height="720"
         Width="1280"
         Icon="youtube-icon-logo.png"
-        WindowStartupLocation="CenterScreen">
+        WindowStartupLocation="CenterScreen"
+        WindowState="Normal"
+        WindowStyle="SingleBorderWindow"
+        KeyDown="Window_KeyDown">
 
     <Grid>
         <wv2:WebView2 x:Name="Browser"/>

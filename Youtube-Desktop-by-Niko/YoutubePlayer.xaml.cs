@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Web;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Threading;
 
 // Made by Niko973
@@ -20,6 +21,45 @@ namespace YoutubeDesktopByNiko
         private string stateFile = "appstate.json";
 
         private DispatcherTimer saveTimer;
+
+        // Для возврата из полноэкранного режима
+        private bool isVideoFullscreen = false;
+        private WindowStyle previousWindowStyle;
+        private ResizeMode previousResizeMode;
+        private bool previousTopmost;
+        private double previousLeft;
+        private double previousTop;
+        private double previousWidth;
+        private double previousHeight;
+        private WindowState previousWindowState;
+
+        // WinAPI для полноэкранного режима
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool GetMonitorInfo(
+            IntPtr hMonitor, ref MONITORINFO lpMonitorInfo);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(
+            IntPtr hwnd, uint dwFlags);
+
+        [System.Runtime.InteropServices.StructLayout(
+            System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public uint cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(
+            System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left, Top, Right, Bottom;
+        }
+
+        private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
 
         public YoutubePlayer()
         {
@@ -162,6 +202,22 @@ namespace YoutubeDesktopByNiko
             };
 
             saveTimer.Start();
+
+            // =====================================
+            // FULLSCREEN DETECTION
+            // =====================================
+
+            Browser.WebMessageReceived += WebMessageReceived;
+
+            // Внедряем скрипт для отслеживания полноэкранного режима
+            string fullscreenScript = @"
+document.addEventListener('fullscreenchange', () => {
+    const isFullscreen = !!document.fullscreenElement;
+    window.chrome.webview.postMessage('{""type"":""fullscreen"",""isFullscreen"":' + isFullscreen + '}');
+});
+";
+
+            await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(fullscreenScript);
         }
 
         // =====================================
@@ -314,6 +370,105 @@ namespace YoutubeDesktopByNiko
             catch
             {
                 return url;
+            }
+        }
+
+        // =====================================
+        // FULLSCREEN — ENTER / EXIT
+        // =====================================
+
+        private void EnterFullscreen()
+        {
+            if (isVideoFullscreen)
+                return;
+
+            // Сохраняем текущие настройки окна
+            previousWindowStyle = WindowStyle;
+            previousResizeMode = ResizeMode;
+            previousTopmost = Topmost;
+            previousLeft = Left;
+            previousTop = Top;
+            previousWidth = Width;
+            previousHeight = Height;
+            previousWindowState = WindowState;
+
+            // Убираем рамку и заголовок окна
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+
+            // Сбрасываем WindowState, чтобы Left/Top/Width/Height работали
+            WindowState = WindowState.Normal;
+
+            // Получаем полный размер монитора через WinAPI (включая под панель задач)
+            var hwnd = new WindowInteropHelper(this).Handle;
+            var hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            var monitorInfo = new MONITORINFO();
+            monitorInfo.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(monitorInfo);
+            GetMonitorInfo(hMonitor, ref monitorInfo);
+
+            // Растягиваем окно на весь экран
+            Left = monitorInfo.rcMonitor.Left;
+            Top = monitorInfo.rcMonitor.Top;
+            Width = monitorInfo.rcMonitor.Right - monitorInfo.rcMonitor.Left;
+            Height = monitorInfo.rcMonitor.Bottom - monitorInfo.rcMonitor.Top;
+
+            // Закрепляем поверх других окон
+            Topmost = true;
+
+            isVideoFullscreen = true;
+        }
+
+        private void ExitFullscreen()
+        {
+            if (!isVideoFullscreen)
+                return;
+
+            // Возвращаем настройки окна
+            Topmost = false;
+            WindowStyle = previousWindowStyle;
+            ResizeMode = previousResizeMode;
+
+            // Восстанавливаем позицию и размер
+            Left = previousLeft;
+            Top = previousTop;
+            Width = previousWidth;
+            Height = previousHeight;
+
+            WindowState = previousWindowState;
+
+            isVideoFullscreen = false;
+        }
+
+        private void WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            try
+            {
+                string message = e.TryGetWebMessageAsString();
+
+                if (message.Contains("\"type\":\"fullscreen\""))
+                {
+                    bool isFullscreen = message.Contains("\"isFullscreen\":true");
+
+                    if (isFullscreen)
+                        EnterFullscreen();
+                    else
+                        ExitFullscreen();
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            // Esc — выход из полноэкранного режима
+            if (e.Key == System.Windows.Input.Key.Escape
+                && isVideoFullscreen)
+            {
+                // Вызываем выход из полноэкранного режима в JS
+                Browser.ExecuteScriptAsync("if(document.fullscreenElement) document.exitFullscreen();");
+                ExitFullscreen();
             }
         }
 
