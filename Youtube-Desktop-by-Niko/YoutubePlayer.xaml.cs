@@ -112,7 +112,7 @@ namespace YoutubeDesktopByNiko
             if (msg == WM_HOTKEY
                 && wParam.ToInt32() == HOTKEY_PICTURE_IN_PICTURE)
             {
-                _ = TogglePictureInPicture();
+                _ = TogglePictureInPictureFromHotkey();
                 handled = true;
             }
 
@@ -348,6 +348,30 @@ document.addEventListener('fullscreenchange', () => {
             await OpenFallbackFloatingPlayer();
         }
 
+        private async Task TogglePictureInPictureFromHotkey()
+        {
+            try
+            {
+                await InjectPictureInPictureScript();
+                await Browser.ExecuteScriptAsync(@"
+(() => {
+    const button = document.getElementById('yt-desktop-pip-button');
+
+    if (button) {
+        button.click();
+        return;
+    }
+
+    if (window.__ytDesktopTogglePictureInPicture)
+        window.__ytDesktopTogglePictureInPicture();
+})();
+");
+            }
+            catch
+            {
+            }
+        }
+
         private async Task InjectPictureInPictureScript()
         {
             try
@@ -445,7 +469,12 @@ document.addEventListener('fullscreenchange', () => {
         if (event.ctrlKey && !event.shiftKey && !event.altKey && event.code === 'KeyP') {
             event.preventDefault();
             event.stopPropagation();
-            window.__ytDesktopTogglePictureInPicture();
+            const button = document.getElementById(buttonId);
+
+            if (button)
+                button.click();
+            else
+                window.__ytDesktopTogglePictureInPicture();
         }
     }, true);
 
@@ -762,7 +791,7 @@ document.addEventListener('fullscreenchange', () => {
             if (e.Key == System.Windows.Input.Key.P
                 && (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) == System.Windows.Input.ModifierKeys.Control)
             {
-                _ = TogglePictureInPicture();
+                _ = TogglePictureInPictureFromHotkey();
                 e.Handled = true;
                 return;
             }
