@@ -17,10 +17,12 @@ namespace YoutubeDesktopByNiko
 {
     public partial class YoutubePlayer : Window
     {
-        private string profilePath;
-        private string stateFile = "appstate.json";
+        private string profilePath = string.Empty;
+        private readonly string stateFile = "appstate.json";
 
-        private DispatcherTimer saveTimer;
+        private CoreWebView2Environment? webViewEnvironment;
+        private DispatcherTimer? saveTimer;
+        private FloatingPlayerWindow? floatingPlayerWindow;
 
         // Для возврата из полноэкранного режима
         private bool isVideoFullscreen = false;
@@ -60,12 +62,61 @@ namespace YoutubeDesktopByNiko
         }
 
         private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+        private const int HOTKEY_PICTURE_IN_PICTURE = 973;
+        private const int WM_HOTKEY = 0x0312;
+        private const uint MOD_CONTROL = 0x0002;
+        private const uint VK_P = 0x50;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool RegisterHotKey(
+            IntPtr hWnd,
+            int id,
+            uint fsModifiers,
+            uint vk
+        );
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool UnregisterHotKey(
+            IntPtr hWnd,
+            int id
+        );
 
         public YoutubePlayer()
         {
             InitializeComponent();
 
+            SourceInitialized += YoutubePlayer_SourceInitialized;
             InitBrowser();
+        }
+
+        private void YoutubePlayer_SourceInitialized(object? sender, EventArgs e)
+        {
+            IntPtr handle =
+                new WindowInteropHelper(this).Handle;
+
+            HwndSource? source =
+                HwndSource.FromHwnd(handle);
+
+            source?.AddHook(WndProc);
+            RegisterHotKey(handle, HOTKEY_PICTURE_IN_PICTURE, MOD_CONTROL, VK_P);
+        }
+
+        private IntPtr WndProc(
+            IntPtr hwnd,
+            int msg,
+            IntPtr wParam,
+            IntPtr lParam,
+            ref bool handled
+        )
+        {
+            if (msg == WM_HOTKEY
+                && wParam.ToInt32() == HOTKEY_PICTURE_IN_PICTURE)
+            {
+                _ = TogglePictureInPicture();
+                handled = true;
+            }
+
+            return IntPtr.Zero;
         }
 
         private async void InitBrowser()
@@ -88,13 +139,23 @@ namespace YoutubeDesktopByNiko
                 AreBrowserExtensionsEnabled = true
             };
 
-            var env = await CoreWebView2Environment.CreateAsync(
+            webViewEnvironment = await CoreWebView2Environment.CreateAsync(
                 null,
                 profilePath,
                 options
             );
 
-            await Browser.EnsureCoreWebView2Async(env);
+            await Browser.EnsureCoreWebView2Async(webViewEnvironment);
+
+            Browser.NavigationCompleted += async (_, __) =>
+            {
+                await InjectPictureInPictureScript();
+            };
+
+            Browser.CoreWebView2.DOMContentLoaded += async (_, __) =>
+            {
+                await InjectPictureInPictureScript();
+            };
 
             // =====================================
             // LOAD UBLOCK
@@ -160,10 +221,13 @@ namespace YoutubeDesktopByNiko
                     using JsonDocument doc =
                         JsonDocument.Parse(json);
 
-                    string url =
+                    string? url =
                         doc.RootElement
                         .GetProperty("url")
                         .GetString();
+
+                    if (string.IsNullOrWhiteSpace(url))
+                        throw new InvalidDataException();
 
                     double savedTime =
                         doc.RootElement
@@ -218,6 +282,9 @@ document.addEventListener('fullscreenchange', () => {
 ";
 
             await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(fullscreenScript);
+
+            await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(GetPictureInPictureScript());
+            await InjectPictureInPictureScript();
         }
 
         // =====================================
@@ -257,6 +324,232 @@ document.addEventListener('fullscreenchange', () => {
             {
                 return url;
             }
+        }
+
+        // =====================================
+        // PICTURE-IN-PICTURE
+        // =====================================
+
+        private async Task TogglePictureInPicture()
+        {
+            try
+            {
+                await InjectPictureInPictureScript();
+                string result =
+                    await Browser.ExecuteScriptAsync("window.__ytDesktopTogglePictureInPicture ? window.__ytDesktopTogglePictureInPicture() : false;");
+
+                if (result == "true")
+                    return;
+            }
+            catch
+            {
+            }
+
+            await OpenFallbackFloatingPlayer();
+        }
+
+        private async Task InjectPictureInPictureScript()
+        {
+            try
+            {
+                if (Browser.CoreWebView2 == null)
+                    return;
+
+                await Browser.ExecuteScriptAsync(GetPictureInPictureScript());
+            }
+            catch
+            {
+            }
+        }
+
+        private string GetPictureInPictureScript()
+        {
+            return @"
+(() => {
+    if (window.__ytDesktopPictureInPictureInstalled)
+        return;
+
+    window.__ytDesktopPictureInPictureInstalled = true;
+
+    const buttonId = 'yt-desktop-pip-button';
+
+    window.__ytDesktopTogglePictureInPicture = async () => {
+        const video = document.querySelector('video');
+
+        if (!video || !document.pictureInPictureEnabled)
+            return false;
+
+        try {
+            if (document.pictureInPictureElement) {
+                await document.exitPictureInPicture();
+                return true;
+            }
+
+            if (video.readyState < 1)
+                await video.play().catch(() => {});
+
+            await video.requestPictureInPicture();
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    const ensureButton = () => {
+        if (!location.hostname.includes('youtube.com'))
+            return;
+
+        let button = document.getElementById(buttonId);
+
+        if (!button) {
+            button = document.createElement('button');
+            button.id = buttonId;
+            button.type = 'button';
+            button.title = 'Картинка в картинке';
+            button.textContent = '⧉';
+            button.addEventListener('click', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const opened = await window.__ytDesktopTogglePictureInPicture();
+
+                if (!opened && window.chrome && window.chrome.webview)
+                    window.chrome.webview.postMessage('{""type"":""pipFallback""}');
+            });
+
+            Object.assign(button.style, {
+                position: 'fixed',
+                right: '18px',
+                top: '76px',
+                width: '42px',
+                height: '42px',
+                zIndex: '2147483647',
+                border: '1px solid rgba(255,255,255,.45)',
+                borderRadius: '21px',
+                background: 'rgba(20,20,20,.78)',
+                color: '#fff',
+                font: '700 22px Arial, sans-serif',
+                lineHeight: '38px',
+                cursor: 'pointer',
+                boxShadow: '0 4px 16px rgba(0,0,0,.28)',
+                padding: '0'
+            });
+
+            document.documentElement.appendChild(button);
+        }
+
+        const hasVideo = !!document.querySelector('video');
+        button.style.display = hasVideo ? 'block' : 'none';
+    };
+
+    document.addEventListener('keydown', event => {
+        if (event.ctrlKey && !event.shiftKey && !event.altKey && event.code === 'KeyP') {
+            event.preventDefault();
+            event.stopPropagation();
+            window.__ytDesktopTogglePictureInPicture();
+        }
+    }, true);
+
+    ensureButton();
+    setInterval(ensureButton, 1000);
+    new MutationObserver(ensureButton).observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+})();
+";
+        }
+
+        private async Task OpenFallbackFloatingPlayer()
+        {
+            CoreWebView2Environment? environment =
+                webViewEnvironment;
+
+            if (Browser.Source == null || environment == null)
+                return;
+
+            string currentUrl =
+                Browser.Source.ToString();
+
+            if (!currentUrl.Contains("youtube.com")
+                && !currentUrl.Contains("youtu.be"))
+            {
+                MessageBox.Show(
+                    "Откройте видео на YouTube, чтобы запустить плавающее окно.",
+                    "Плавающий плеер",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information
+                );
+
+                return;
+            }
+
+            double currentTime =
+                await GetCurrentVideoTime();
+
+            string floatingUrl =
+                BuildUrlWithTime(currentUrl, currentTime);
+
+            if (floatingPlayerWindow == null || !floatingPlayerWindow.IsLoaded)
+            {
+                floatingPlayerWindow =
+                    new FloatingPlayerWindow(environment)
+                    {
+                        Owner = this
+                    };
+
+                floatingPlayerWindow.Closed += (_, __) =>
+                {
+                    floatingPlayerWindow = null;
+                };
+
+                floatingPlayerWindow.Show();
+            }
+            else
+            {
+                floatingPlayerWindow.Show();
+                floatingPlayerWindow.Activate();
+            }
+
+            await floatingPlayerWindow.NavigateAsync(floatingUrl);
+        }
+
+        private async Task<double> GetCurrentVideoTime()
+        {
+            try
+            {
+                string script = @"
+(() => {
+
+    let v = document.querySelector('video');
+
+    if(!v)
+        return 0;
+
+    return Number(v.currentTime || 0);
+
+})();
+";
+
+                string result =
+                    await Browser.ExecuteScriptAsync(script);
+
+                result =
+                    result.Replace("\"", "");
+
+                if (double.TryParse(
+                    result,
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out double currentTime))
+                {
+                    return currentTime;
+                }
+            }
+            catch
+            {
+            }
+
+            return 0;
         }
 
         // =====================================
@@ -439,7 +732,7 @@ document.addEventListener('fullscreenchange', () => {
             isVideoFullscreen = false;
         }
 
-        private void WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        private void WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
             try
             {
@@ -454,6 +747,10 @@ document.addEventListener('fullscreenchange', () => {
                     else
                         ExitFullscreen();
                 }
+                else if (message.Contains("\"type\":\"pipFallback\""))
+                {
+                    _ = OpenFallbackFloatingPlayer();
+                }
             }
             catch
             {
@@ -462,6 +759,14 @@ document.addEventListener('fullscreenchange', () => {
 
         private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
+            if (e.Key == System.Windows.Input.Key.P
+                && (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) == System.Windows.Input.ModifierKeys.Control)
+            {
+                _ = TogglePictureInPicture();
+                e.Handled = true;
+                return;
+            }
+
             // Esc — выход из полноэкранного режима
             if (e.Key == System.Windows.Input.Key.Escape
                 && isVideoFullscreen)
@@ -478,6 +783,11 @@ document.addEventListener('fullscreenchange', () => {
 
         protected override async void OnClosed(EventArgs e)
         {
+            IntPtr handle =
+                new WindowInteropHelper(this).Handle;
+
+            UnregisterHotKey(handle, HOTKEY_PICTURE_IN_PICTURE);
+
             await SaveState();
 
             base.OnClosed(e);

@@ -9,7 +9,8 @@
         WindowStartupLocation="CenterScreen"
         WindowState="Normal"
         WindowStyle="SingleBorderWindow"
-        KeyDown="Window_KeyDown">
+        KeyDown="Window_KeyDown"
+        PreviewKeyDown="Window_KeyDown">
 
     <Grid>
         <wv2:WebView2 x:Name="Browser"/>
